@@ -196,9 +196,6 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       LOGGER.error(e.getMessage(), e);
     }
     dockerHost = zConf.getString(ConfVars.ZEPPELIN_DOCKER_HOST);
-
-    // Initialize metrics
-    initializeMetrics();
   }
 
   @Override
