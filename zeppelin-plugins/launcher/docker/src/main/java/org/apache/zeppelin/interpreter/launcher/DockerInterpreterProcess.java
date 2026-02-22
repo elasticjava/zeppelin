@@ -520,9 +520,10 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
         // ERROR log only once when crossing failure threshold
         // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
         if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
-          LOGGER.error("Docker container {} health check failed persistently ({} failures, {}ms without success). " +
-                      "Assuming dead to prevent resource leak.",
-                      containerName, failures, timeSinceLastSuccess);
+          LOGGER.error(
+              "Docker container {} health check failed persistently "
+                  + "({} failures, {}ms without success). Assuming dead to prevent resource leak.",
+              containerName, failures, timeSinceLastSuccess);
           // Increment persistent failure metric for alerting
           persistentFailuresCounter.increment();
         }
@@ -537,13 +538,17 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
           : System.currentTimeMillis() - lastSuccess;
 
       // Choose grace window
-      long graceWindow = (lastSuccess == 0) ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
+      long graceWindow = (lastSuccess == 0)
+          ? INITIAL_GRACE_WINDOW_MS
+          : HEALTH_CHECK_GRACE_WINDOW_MS;
 
       // Increment error metric first, then restore interrupt flag before logging
       healthCheckErrorsCounter.increment();
       Thread.currentThread().interrupt();
 
-      LOGGER.warn("Interrupted while inspecting container {} (failure #{})", containerName, failures, e);
+      LOGGER.warn(
+          "Interrupted while inspecting container {} (failure #{})",
+          containerName, failures, e);
 
       // Fail-open only if BOTH conditions are satisfied
       if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
@@ -552,8 +557,10 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
         // ERROR log only once when crossing failure threshold
         // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
         if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
-          LOGGER.error("Docker container {} health check failed persistently (interrupted, {} failures, {}ms without success).",
-                      containerName, failures, timeSinceLastSuccess);
+          LOGGER.error(
+              "Docker container {} health check failed persistently "
+                  + "(interrupted, {} failures, {}ms without success).",
+              containerName, failures, timeSinceLastSuccess);
           // Increment persistent failure metric for alerting
           persistentFailuresCounter.increment();
         }
@@ -566,7 +573,8 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
   public boolean isRunning() {
     // Ensure invariant: isRunning() => isAlive()
     // This prevents violation when endpoint is reachable but inspect is failing
-    return isAlive() && RemoteInterpreterUtils.checkIfRemoteEndpointAccessible(getHost(), getPort());
+    return isAlive()
+        && RemoteInterpreterUtils.checkIfRemoteEndpointAccessible(getHost(), getPort());
   }
 
   @Override

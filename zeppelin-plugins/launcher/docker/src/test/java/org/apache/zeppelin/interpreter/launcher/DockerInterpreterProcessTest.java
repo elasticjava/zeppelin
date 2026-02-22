@@ -17,7 +17,6 @@
 package org.apache.zeppelin.interpreter.launcher;
 
 import com.spotify.docker.client.DockerClient;
-import com.spotify.docker.client.exceptions.DockerException;
 import com.spotify.docker.client.messages.ContainerInfo;
 import com.spotify.docker.client.messages.ContainerState;
 import org.apache.zeppelin.conf.ZeppelinConfiguration;
@@ -43,7 +42,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
@@ -200,7 +198,7 @@ class DockerInterpreterProcessTest {
 
   /**
    * Table-driven test verifying correct state mapping for all Docker container states.
-   * TODO: Enable once DockerInterpreterProcess has test-friendly constructor
+   * TODO(zeppelin-team): Enable once DockerInterpreterProcess has test-friendly constructor
    */
   @Disabled("Requires test infrastructure to inject mock DockerClient")
   @ParameterizedTest
