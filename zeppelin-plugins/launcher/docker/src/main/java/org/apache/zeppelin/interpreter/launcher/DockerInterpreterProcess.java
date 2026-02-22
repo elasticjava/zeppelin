@@ -212,7 +212,10 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
   @Override
   public void start(String userName) throws IOException {
-    docker = DefaultDockerClient.builder().uri(URI.create(dockerHost)).build();
+    // Only create DockerClient if not already set (e.g., for testing)
+    if (docker == null) {
+      docker = DefaultDockerClient.builder().uri(URI.create(dockerHost)).build();
+    }
 
     removeExistContainer(containerName);
 
@@ -407,22 +410,24 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
         LOGGER.warn("Ignore the exception when shutting down", e);
       }
     }
-    try {
-      // Kill container
-      docker.killContainer(containerName);
+    if (docker != null) {
+      try {
+        // Kill container
+        docker.killContainer(containerName);
 
-      // Remove container
-      docker.removeContainer(containerName);
-    } catch (InterruptedException e) {
-      LOGGER.error(e.getMessage(), e);
-      // Restore interrupted state...
-      Thread.currentThread().interrupt();
-    } catch (DockerException e) {
-      LOGGER.error(e.getMessage(), e);
+        // Remove container
+        docker.removeContainer(containerName);
+      } catch (InterruptedException e) {
+        LOGGER.error(e.getMessage(), e);
+        // Restore interrupted state...
+        Thread.currentThread().interrupt();
+      } catch (DockerException e) {
+        LOGGER.error(e.getMessage(), e);
+      }
+
+      // Close the docker client
+      docker.close();
     }
-
-    // Close the docker client
-    docker.close();
   }
 
   // Because docker can't create a container with the same name, it will cause the creation to fail.
