@@ -72,7 +72,8 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Metrics;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.zeppelin.conf.ZeppelinConfiguration.ConfVars.ZEPPELIN_SERVER_KERBEROS_KEYTAB;
+import static org.apache.zeppelin.conf.ZeppelinConfiguration.ConfVars
+    .ZEPPELIN_SERVER_KERBEROS_KEYTAB;
 
 public class DockerInterpreterProcess extends RemoteInterpreterProcess {
   private static final Logger LOGGER = LoggerFactory.getLogger(DockerInterpreterProcess.class);
@@ -495,14 +496,16 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
       // Validate state is present
       if (state == null || state.status() == null) {
-        LOGGER.warn("Docker container {} returned null state or status - treating as transient API error", containerName);
+        LOGGER.warn("Docker container {} returned null state or status - "
+            + "treating as transient API error", containerName);
         // Don't reset counters - treat as transient error, let failure policy handle it
         throw new RuntimeException("Null container state from Docker API");
       }
 
       // Terminal if: (1) status in terminal set OR (2) not running
       String status = state.status();
-      boolean isTerminalStatus = TERMINAL_CONTAINER_STATES.contains(status.toLowerCase(Locale.ROOT));
+      boolean isTerminalStatus =
+          TERMINAL_CONTAINER_STATES.contains(status.toLowerCase(Locale.ROOT));
       boolean isNotRunning = !Boolean.TRUE.equals(state.running());
 
       // Successful health check: reset counters atomically
@@ -535,14 +538,16 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
           : System.currentTimeMillis() - lastSuccess;
 
       // Choose grace window based on whether we've ever succeeded
-      long graceWindow = (lastSuccess == 0) ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
+      long graceWindow = (lastSuccess == 0)
+          ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
 
       // Increment error metric first (before logging, in case logging fails)
       healthCheckErrorsCounter.increment();
 
       // WARN for transient errors
-      LOGGER.warn("Failed to inspect Docker container {} (failure #{}, {}ms since last success): {}",
-                  containerName, failures, timeSinceLastSuccess, e.getMessage(), e);
+      LOGGER.warn("Failed to inspect Docker container {} "
+          + "(failure #{}, {}ms since last success): {}",
+          containerName, failures, timeSinceLastSuccess, e.getMessage(), e);
 
       // Fail-open only if BOTH conditions are satisfied
       if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
