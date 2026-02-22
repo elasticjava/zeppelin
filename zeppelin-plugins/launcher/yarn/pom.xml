@@ -50,6 +50,13 @@
       <artifactId>hadoop-client-runtime</artifactId>
       <scope>provided</scope>
     </dependency>
+
+    <!-- Metrics -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+      <version>${micrometer.version}</version>
+    </dependency>
   </dependencies>
 
   <build>

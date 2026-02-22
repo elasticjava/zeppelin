@@ -67,6 +67,13 @@
       <artifactId>commons-compress</artifactId>
       <version>${commons.compress.version}</version>
     </dependency>
+
+    <!-- Metrics -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+      <version>${micrometer.version}</version>
+    </dependency>
   </dependencies>
 
   <build>
