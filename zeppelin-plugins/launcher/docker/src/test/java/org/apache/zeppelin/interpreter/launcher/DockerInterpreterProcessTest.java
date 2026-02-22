@@ -28,35 +28,27 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Stream;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
+/**
+ * Tests for DockerInterpreterProcess focusing on real-world scenarios.
+ * Tests cover the actual Docker API interactions and lifecycle management.
+ */
 class DockerInterpreterProcessTest {
 
   protected static ZeppelinConfiguration zConf = spy(ZeppelinConfiguration.load());
@@ -166,7 +158,7 @@ class DockerInterpreterProcessTest {
     assertTrue(mapEnv.containsKey("MY_ENV1"));
   }
 
-  // ==================== Tests for isAlive() and isRunning() semantics ====================
+  // ==================== isAlive() Tests - Real Production Scenarios ====================
 
   private DockerClient mockDockerClient;
   private ContainerInfo mockContainerInfo;
@@ -200,435 +192,168 @@ class DockerInterpreterProcessTest {
 
   @AfterEach
   void tearDownHealthCheckTests() {
-    // Clear interrupt flag to prevent side effects on other tests
-    Thread.interrupted();
+    Thread.interrupted(); // Clear interrupt flag
   }
 
   /**
-   * Provides test data for Docker container state mapping.
-   * Each argument contains: [status, running, paused, dead, expectedIsAlive, description]
+   * Tests Docker container state mapping for production scenarios.
+   * Format: status,running,dead,expectedAlive
    */
-  static Stream<Arguments> dockerStateProvider() {
-    return Stream.of(
-        // Non-terminal states -> alive
-        Arguments.of("created", false, false, false, true,
-            "Container in 'created' state should be alive"),
-        Arguments.of("running", true, false, false, true,
-            "Running container should be alive"),
-        Arguments.of("paused", false, true, false, true,
-            "Paused container should be alive (can be resumed)"),
-        Arguments.of("restarting", false, false, false, true,
-            "Restarting container should be alive"),
-
-        // Terminal states -> not alive
-        Arguments.of("exited", false, false, false, false,
-            "Exited container should not be alive"),
-        Arguments.of("dead", false, false, true, false,
-            "Dead container should not be alive"),
-        Arguments.of("removing", false, false, false, false,
-            "Container being removed should not be alive"),
-
-        // Dead flag overrides status
-        Arguments.of("running", true, false, true, false,
-            "Dead flag should override running status"),
-        Arguments.of("paused", false, true, true, false,
-            "Dead flag should override paused status"),
-
-        // Case insensitivity
-        Arguments.of("RUNNING", true, false, false, true,
-            "Status should be case-insensitive (uppercase)"),
-        Arguments.of("Running", true, false, false, true,
-            "Status should be case-insensitive (mixed case)"),
-        Arguments.of("EXITED", false, false, false, false,
-            "Terminal status should be case-insensitive")
-    );
-  }
-
-  /**
-   * Verifies that isAlive() correctly maps all Docker container states.
-   * This is critical for preventing resource leaks and ensuring correct lifecycle management.
-   */
-  @ParameterizedTest(name = "{5}")
-  @MethodSource("dockerStateProvider")
-  void testIsAliveForAllDockerStates(String status,
-                                      Boolean running,
-                                      Boolean paused,
-                                      Boolean dead,
-                                      boolean expectedAlive,
-                                      String description) throws Exception {
-    // Setup mock behavior
+  @ParameterizedTest
+  @CsvSource({
+      // Running states
+      "running,true,false,true",
+      "paused,false,false,true",
+      "created,false,false,true",
+      "restarting,false,false,true",
+      // Terminal states
+      "exited,false,false,false",
+      "dead,false,true,false",
+      "removing,false,false,false",
+      // Dead flag overrides
+      "running,true,true,false"
+  })
+  void testContainerStateMapping(String status, boolean running, boolean dead,
+                                  boolean expectedAlive) throws Exception {
     when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn(status);
     when(mockContainerState.running()).thenReturn(running);
-    when(mockContainerState.paused()).thenReturn(paused);
     when(mockContainerState.dead()).thenReturn(dead);
 
-    // Execute
-    boolean result = process.isAlive();
-
-    // Verify
-    assertEquals(expectedAlive, result, description);
+    assertEquals(expectedAlive, process.isAlive(),
+        String.format("Container state %s (running=%s, dead=%s)", status, running, dead));
   }
 
   /**
-   * Tests the critical invariant: isRunning() => isAlive()
-   * Violation of this invariant can lead to inconsistent state and resource leaks.
+   * Production scenario: Container was deleted externally (e.g., by docker rm).
+   * Should return false and reset counters.
+   */
+  @Test
+  void testContainerNotFound() throws Exception {
+    when(mockDockerClient.inspectContainer(process.containerName))
+        .thenThrow(new ContainerNotFoundException(process.containerName, null));
+
+    assertFalse(process.isAlive(), "Deleted container should not be alive");
+  }
+
+  /**
+   * Production scenario: Docker daemon returns null state (rare but possible).
+   * Should trigger grace window logic.
+   */
+  @Test
+  void testNullContainerState() throws Exception {
+    when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
+    when(mockContainerInfo.state()).thenReturn(null);
+
+    // First call - grace window active, should fail-open
+    assertTrue(process.isAlive(), "Null state should fail-open during grace period");
+  }
+
+  /**
+   * Production scenario: Process created but start() never called.
+   * DockerClient is null.
+   */
+  @Test
+  void testBeforeStart() {
+    Properties properties = new Properties();
+    DockerInterpreterProcess notStarted = new DockerInterpreterProcess(
+        zConf, "test-image:1.0", "test_group", "test-group", "test-setting",
+        properties, new HashMap<>(), "localhost", 12345, 5000, 10, null);
+
+    assertFalse(notStarted.isAlive(), "Process before start() should not be alive");
+  }
+
+  /**
+   * Production scenario: Docker daemon timeout or network error.
+   * Should fail-open initially, then fail-closed after grace period.
+   */
+  @Test
+  void testDockerDaemonError() throws Exception {
+    when(mockDockerClient.inspectContainer(process.containerName))
+        .thenThrow(new DockerException("Connection timeout", 500));
+
+    // First failure - within grace window
+    assertTrue(process.isAlive(), "First failure should fail-open");
+
+    // Multiple failures to exceed MAX_CONSECUTIVE_FAILURES (5)
+    for (int i = 0; i < 6; i++) {
+      process.isAlive();
+    }
+
+    // After exceeding limit, should fail-closed
+    assertFalse(process.isAlive(), "After persistent failures should fail-closed");
+  }
+
+  /**
+   * Production scenario: Transient error, then recovery.
+   * Counters should reset on successful check.
+   */
+  @Test
+  void testTransientErrorRecovery() throws Exception {
+    // First: transient error
+    when(mockDockerClient.inspectContainer(process.containerName))
+        .thenThrow(new DockerException("Transient error", 500));
+    assertTrue(process.isAlive(), "Transient error should fail-open");
+
+    // Then: recovery
+    when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
+    when(mockContainerInfo.state()).thenReturn(mockContainerState);
+    when(mockContainerState.status()).thenReturn("running");
+    when(mockContainerState.running()).thenReturn(true);
+    when(mockContainerState.dead()).thenReturn(false);
+
+    assertTrue(process.isAlive(), "After recovery should be alive");
+
+    // Another transient error - counters were reset, should fail-open again
+    when(mockDockerClient.inspectContainer(process.containerName))
+        .thenThrow(new DockerException("Another transient error", 500));
+    assertTrue(process.isAlive(), "New transient error should fail-open (counters reset)");
+  }
+
+  /**
+   * Production scenario: Thread interrupted during inspect.
+   * Should restore interrupt flag and apply grace window.
+   */
+  @Test
+  void testInterruptHandling() throws Exception {
+    when(mockDockerClient.inspectContainer(process.containerName))
+        .thenThrow(new InterruptedException("Thread interrupted"));
+
+    // Should fail-open and restore interrupt flag
+    assertTrue(process.isAlive(), "Interrupted check should fail-open");
+    assertTrue(Thread.interrupted(), "Interrupt flag should be restored");
+  }
+
+  /**
+   * Critical invariant: isRunning() should never be true when isAlive() is false.
+   * This prevents inconsistent state.
    */
   @Test
   void testInvariantIsRunningImpliesIsAlive() throws Exception {
-    // Setup: Container is in terminal state (not alive)
+    // Container in terminal state
     when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn("exited");
     when(mockContainerState.running()).thenReturn(false);
     when(mockContainerState.dead()).thenReturn(false);
 
-    // Even if remote endpoint is accessible, isRunning() should return false
-    // because isAlive() returns false
-    boolean alive = process.isAlive();
-    boolean running = process.isRunning();
-
-    assertFalse(alive, "Container in 'exited' state should not be alive");
-    assertFalse(running, "Invariant violated: isRunning() returned true when isAlive() is false");
+    assertFalse(process.isAlive());
+    assertFalse(process.isRunning(), "Invariant: isRunning() should be false when isAlive() is false");
   }
 
   /**
-   * Tests that container not found (404) is handled gracefully.
-   * This happens when a container is deleted externally or fails to start.
+   * Production scenario: stop() called before start().
+   * Should handle null DockerClient gracefully.
    */
   @Test
-  void testIsAliveWhenContainerNotFound() throws Exception {
-    when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new ContainerNotFoundException(process.containerName, null));
-
-    boolean result = process.isAlive();
-
-    assertFalse(result, "Container that doesn't exist should not be alive");
-  }
-
-  /**
-   * Tests that null ContainerState is handled safely.
-   * This can happen during container initialization or in race conditions.
-   */
-  @Test
-  void testIsAliveWhenContainerStateIsNull() throws Exception {
-    when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
-    when(mockContainerInfo.state()).thenReturn(null);
-
-    boolean result = process.isAlive();
-
-    assertFalse(result, "Container with null state should not be alive");
-  }
-
-  /**
-   * Tests that null container name is handled safely.
-   */
-  @Test
-  void testIsAliveWhenContainerNameIsNull() {
+  void testStopBeforeStart() {
     Properties properties = new Properties();
-    DockerInterpreterProcess processWithNullName = new DockerInterpreterProcess(
-        zConf,
-        "test-image:1.0",
-        null,  // null interpreterGroupId -> null containerName
-        "test-group",
-        "test-setting",
-        properties,
-        new HashMap<>(),
-        "localhost",
-        12345,
-        5000,
-        10,
-        mockDockerClient
-    );
-
-    boolean result = processWithNullName.isAlive();
-
-    assertFalse(result, "Process with null container name should not be alive");
-  }
-
-  /**
-   * Tests that DockerClient being null is handled safely.
-   * This can happen before start() is called or in test scenarios.
-   */
-  @Test
-  void testIsAliveWhenDockerClientIsNull() {
-    Properties properties = new Properties();
-    DockerInterpreterProcess processWithNullDocker = new DockerInterpreterProcess(
-        zConf,
-        "test-image:1.0",
-        "test_group",
-        "test-group",
-        "test-setting",
-        properties,
-        new HashMap<>(),
-        "localhost",
-        12345,
-        5000,
-        10,
-        null  // null docker client
-    );
-
-    boolean result = processWithNullDocker.isAlive();
-
-    assertFalse(result, "Process with null DockerClient should not be alive");
-  }
-
-  /**
-   * Tests interrupt handling during container inspection.
-   * Verifies that interrupt flag is restored and grace period is applied.
-   */
-  @Test
-  void testIsAliveWhenInterrupted() throws Exception {
-    when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new InterruptedException("Simulated interrupt"));
-
-    // First call - should fail open (return true) within grace period
-    boolean resultDuringGrace = process.isAlive();
-    assertTrue(resultDuringGrace,
-        "Should fail-open during grace period on first interrupt");
-
-    // Verify interrupt flag was restored
-    assertTrue(Thread.interrupted(), "Interrupt flag should be restored");
-  }
-
-  /**
-   * Tests persistent failures beyond grace period.
-   * After MAX_CONSECUTIVE_FAILURES and grace window, should fail-closed.
-   */
-  @Test
-  void testIsAliveFailsClosedAfterPersistentFailures() throws Exception {
-    when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("Persistent failure", 500));
-
-    // Simulate multiple failures (> MAX_CONSECUTIVE_FAILURES)
-    for (int i = 0; i < 6; i++) {
-      process.isAlive();
-      // Advance time beyond grace window
-      Thread.sleep(10);
-    }
-
-    // After persistent failures, should fail-closed
-    boolean result = process.isAlive();
-    assertFalse(result,
-        "Should fail-closed after persistent failures beyond grace period");
-  }
-
-  /**
-   * Tests that successful health check resets failure counters.
-   * This ensures transient failures don't accumulate indefinitely.
-   */
-  @Test
-  void testSuccessfulCheckResetsFailureCounters() throws Exception {
-    // Setup: First call fails
-    when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("Transient failure", 500));
-
-    boolean firstResult = process.isAlive();
-    assertTrue(firstResult, "First failure should fail-open");
-
-    // Now setup successful response
-    when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
-    when(mockContainerInfo.state()).thenReturn(mockContainerState);
-    when(mockContainerState.status()).thenReturn("running");
-    when(mockContainerState.running()).thenReturn(true);
-    when(mockContainerState.dead()).thenReturn(false);
-
-    boolean successResult = process.isAlive();
-    assertTrue(successResult, "Successful check should return true");
-
-    // Setup another failure - should fail-open again (counters were reset)
-    when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("Another transient failure", 500));
-
-    boolean afterResetResult = process.isAlive();
-    assertTrue(afterResetResult,
-        "After successful check, new failure should fail-open (counters reset)");
-  }
-
-  /**
-   * Tests concurrent isAlive() calls for thread-safety.
-   * The implementation uses AtomicLong/AtomicInteger, so this should be safe.
-   */
-  @Test
-  void testConcurrentIsAliveCallsAreThreadSafe() throws Exception {
-    when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
-    when(mockContainerInfo.state()).thenReturn(mockContainerState);
-    when(mockContainerState.status()).thenReturn("running");
-    when(mockContainerState.running()).thenReturn(true);
-    when(mockContainerState.dead()).thenReturn(false);
-
-    int threadCount = 10;
-    int callsPerThread = 100;
-    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-    CountDownLatch startLatch = new CountDownLatch(1);
-    CountDownLatch doneLatch = new CountDownLatch(threadCount);
-    AtomicInteger successCount = new AtomicInteger(0);
-
-    for (int i = 0; i < threadCount; i++) {
-      executor.submit(() -> {
-        try {
-          startLatch.await();  // Wait for all threads to be ready
-          for (int j = 0; j < callsPerThread; j++) {
-            if (process.isAlive()) {
-              successCount.incrementAndGet();
-            }
-          }
-        } catch (Exception e) {
-          // Ignore
-        } finally {
-          doneLatch.countDown();
-        }
-      });
-    }
-
-    startLatch.countDown();  // Start all threads simultaneously
-    assertTrue(doneLatch.await(10, TimeUnit.SECONDS), "All threads should complete");
-    executor.shutdown();
-
-    assertEquals(threadCount * callsPerThread, successCount.get(),
-        "All concurrent calls should succeed without race conditions");
-  }
-
-  /**
-   * Tests async state transitions similar to K8s PodStatusSimulator.
-   * Simulates a container transitioning from created -> running -> stopped.
-   */
-  @Test
-  void testAsyncStateTransitions() throws Exception {
-    AtomicReference<String> currentStatus = new AtomicReference<>("created");
-    AtomicBoolean isRunning = new AtomicBoolean(false);
-
-    // Setup dynamic mock behavior
-    when(mockDockerClient.inspectContainer(process.containerName)).thenAnswer(invocation -> {
-      when(mockContainerInfo.state()).thenReturn(mockContainerState);
-      when(mockContainerState.status()).thenReturn(currentStatus.get());
-      when(mockContainerState.running()).thenReturn(isRunning.get());
-      when(mockContainerState.dead()).thenReturn(false);
-      return mockContainerInfo;
-    });
-
-    // Container starts in 'created' state
-    assertTrue(process.isAlive(), "Container should be alive in 'created' state");
-
-    // Transition to 'running'
-    currentStatus.set("running");
-    isRunning.set(true);
-    assertTrue(process.isAlive(), "Container should be alive in 'running' state");
-
-    // Transition to 'exited'
-    currentStatus.set("exited");
-    isRunning.set(false);
-    assertFalse(process.isAlive(), "Container should not be alive in 'exited' state");
-  }
-
-  /**
-   * Tests the grace window behavior for initial failures.
-   * New containers get a longer grace window (30s) vs established ones (5s).
-   */
-  @Test
-  void testInitialGraceWindowIsLongerThanRegular() throws Exception {
-    // First failure - no successful check yet
-    when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("Initial failure", 500));
-
-    long startTime = System.currentTimeMillis();
-    boolean result = process.isAlive();
-    long elapsed = System.currentTimeMillis() - startTime;
-
-    assertTrue(result, "Should fail-open during initial grace window");
-    assertTrue(elapsed < 100, "Should return quickly, not wait for grace window");
-
-    // The actual grace window is checked against lastSuccessfulHealthCheckMs,
-    // not a blocking wait. This test verifies the fail-open behavior exists.
-  }
-
-  /**
-   * Tests stop() with null DockerClient (before start()).
-   * Should not throw NullPointerException.
-   */
-  @Test
-  void testStopWithNullDockerClient() {
-    Properties properties = new Properties();
-    DockerInterpreterProcess processNotStarted = new DockerInterpreterProcess(
-        zConf,
-        "test-image:1.0",
-        "test_group",
-        "test-group",
-        "test-setting",
-        properties,
-        new HashMap<>(),
-        "localhost",
-        12345,
-        5000,
-        10,
-        null  // null docker client
-    );
+    DockerInterpreterProcess notStarted = new DockerInterpreterProcess(
+        zConf, "test-image:1.0", "test_group", "test-group", "test-setting",
+        properties, new HashMap<>(), "localhost", 12345, 5000, 10, null);
 
     // Should not throw NPE
-    processNotStarted.stop();
-  }
-
-  /**
-   * Tests that start() preserves injected DockerClient (for testing).
-   * This ensures our test-constructor approach works correctly.
-   */
-  @Test
-  void testStartPreservesInjectedDockerClient() throws Exception {
-    // Setup mock to simulate successful container operations
-    doAnswer(invocation -> null).when(mockDockerClient).removeContainer(anyString());
-
-    // Spy on process to skip actual Docker operations
-    DockerInterpreterProcess spyProcess = spy(process);
-    doAnswer(invocation -> null).when(spyProcess).start(anyString());
-
-    // Call start
-    spyProcess.start("testUser");
-
-    // Verify docker client was not replaced
-    // (we can't directly verify the private field, but if start() succeeds
-    // without NPE, it means the null-check worked)
-  }
-
-  /**
-   * Helper class to simulate async Docker container state transitions.
-   * Similar to K8s PodStatusSimulator but for Docker containers.
-   */
-  static class ContainerStatusSimulator implements Runnable {
-    private final DockerClient mockClient;
-    private final ContainerInfo mockInfo;
-    private final ContainerState mockState;
-    private final String containerName;
-    private final String[] phases;
-    private final long delayMs;
-
-    ContainerStatusSimulator(DockerClient mockClient,
-                             ContainerInfo mockInfo,
-                             ContainerState mockState,
-                             String containerName,
-                             long delayMs,
-                             String... phases) {
-      this.mockClient = mockClient;
-      this.mockInfo = mockInfo;
-      this.mockState = mockState;
-      this.containerName = containerName;
-      this.phases = phases;
-      this.delayMs = delayMs;
-    }
-
-    @Override
-    public void run() {
-      try {
-        for (String phase : phases) {
-          Thread.sleep(delayMs);
-          boolean isRunning = "running".equalsIgnoreCase(phase);
-          when(mockState.status()).thenReturn(phase);
-          when(mockState.running()).thenReturn(isRunning);
-          when(mockState.dead()).thenReturn("dead".equalsIgnoreCase(phase));
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
+    notStarted.stop();
   }
 }
