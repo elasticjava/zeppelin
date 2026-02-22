@@ -99,7 +99,7 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
   private static final long HEALTH_CHECK_GRACE_WINDOW_MS = 30_000;  // 30 seconds
   private static final long INITIAL_GRACE_WINDOW_MS = 5_000;  // 5 seconds for unvalidated clients
 
-  // Metrics for monitoring health check behavior
+  // Metrics for monitoring health check behavior (initialized at class load time)
   private static final Counter healthCheckErrorsCounter =
       Metrics.counter("zeppelin.launcher.healthcheck.errors", "type", "docker");
   private static final Counter persistentFailuresCounter =
