@@ -665,9 +665,12 @@ public class YarnRemoteInterpreterProcess extends RemoteInterpreterProcess {
       ApplicationReport report = getApplicationReport(appId);
       YarnApplicationState state = report.getYarnApplicationState();
 
-      // Successful health check: reset counters
+      // Successful health check: reset counters atomically
+      // Set timestamp FIRST to establish "validated" state, then reset failures
+      // This prevents race conditions where another thread sees failures=0 but lastSuccess=0
+      long now = System.currentTimeMillis();
+      lastSuccessfulHealthCheckMs.set(now);
       consecutiveHealthCheckFailures.set(0);
-      lastSuccessfulHealthCheckMs.set(System.currentTimeMillis());
 
       // Non-terminal states = alive
       return state != YarnApplicationState.FINISHED &&
@@ -676,8 +679,10 @@ public class YarnRemoteInterpreterProcess extends RemoteInterpreterProcess {
 
     } catch (ApplicationNotFoundException e) {
       LOGGER.debug("YARN application {} not found", appId);
-      consecutiveHealthCheckFailures.set(0);  // Reset (definitive answer)
+      // Reset to unvalidated state (definitive answer - app is gone)
+      // Set timestamp FIRST for consistency with successful path
       lastSuccessfulHealthCheckMs.set(0L);
+      consecutiveHealthCheckFailures.set(0);
       return false;
 
     } catch (YarnException | IOException e) {
@@ -691,20 +696,20 @@ public class YarnRemoteInterpreterProcess extends RemoteInterpreterProcess {
       // Choose grace window based on whether we've ever succeeded
       long graceWindow = (lastSuccess == 0) ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
 
+      // Increment error metric first (before logging, in case logging fails)
+      healthCheckErrorsCounter.increment();
+
       // WARN for transient errors
       LOGGER.warn("Failed to get YARN application state for {} (failure #{}, {}ms since last success): {}",
                   appId, failures, timeSinceLastSuccess, e.getClass().getSimpleName(), e);
-
-      // Increment error metric for monitoring
-      healthCheckErrorsCounter.increment();
 
       // Fail-open only if BOTH conditions are satisfied
       if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
         return true;  // Conservative: assume "alive" within grace window
       } else {
-        // ERROR only once when crossing into persistent failure state
-        if (failures == MAX_CONSECUTIVE_FAILURES + 1 ||
-            (lastSuccess > 0 && timeSinceLastSuccess >= graceWindow && failures == 1)) {
+        // ERROR log only once when crossing failure threshold
+        // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
+        if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
           LOGGER.error("YARN application {} health check failed persistently ({} failures, {}ms without success). " +
                       "Assuming dead to prevent resource leak.",
                       appId, failures, timeSinceLastSuccess);

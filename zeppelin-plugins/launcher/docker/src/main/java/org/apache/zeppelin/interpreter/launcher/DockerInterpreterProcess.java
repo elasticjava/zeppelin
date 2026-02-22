@@ -462,23 +462,24 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       ContainerInfo info = docker.inspectContainer(containerName);
       ContainerState state = info.state();
 
-      if (state == null) {
-        return false;
-      }
-
-      // Container is alive if NOT in terminal state
-      String status = state.status();
-      if (status == null) {
-        return false;
+      // Validate state is present
+      if (state == null || state.status() == null) {
+        LOGGER.warn("Docker container {} returned null state or status - treating as transient API error", containerName);
+        // Don't reset counters - treat as transient error, let failure policy handle it
+        throw new DockerException("Null container state", 500);
       }
 
       // Terminal if: (1) status in terminal set OR (2) dead flag set
+      String status = state.status();
       boolean isTerminalStatus = TERMINAL_CONTAINER_STATES.contains(status.toLowerCase(Locale.ROOT));
       boolean isDead = Boolean.TRUE.equals(state.dead());
 
-      // Successful health check: reset counters
+      // Successful health check: reset counters atomically
+      // Set timestamp FIRST to establish "validated" state, then reset failures
+      // This prevents race conditions where another thread sees failures=0 but lastSuccess=0
+      long now = System.currentTimeMillis();
+      lastSuccessfulHealthCheckMs.set(now);
       consecutiveHealthCheckFailures.set(0);
-      lastSuccessfulHealthCheckMs.set(System.currentTimeMillis());
 
       return !isTerminalStatus && !isDead;
 
@@ -486,8 +487,10 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       // 404 = Container does not exist
       if (e.status() != null && e.status() == 404) {
         LOGGER.debug("Docker container {} not found", containerName);
-        consecutiveHealthCheckFailures.set(0);  // Reset
+        // Reset to unvalidated state (definitive answer - container is gone)
+        // Set timestamp FIRST for consistency with successful path
         lastSuccessfulHealthCheckMs.set(0L);
+        consecutiveHealthCheckFailures.set(0);
         return false;
       }
 
@@ -501,20 +504,20 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       // Choose grace window based on whether we've ever succeeded
       long graceWindow = (lastSuccess == 0) ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
 
+      // Increment error metric first (before logging, in case logging fails)
+      healthCheckErrorsCounter.increment();
+
       // WARN for transient errors
       LOGGER.warn("Failed to inspect Docker container {} (failure #{}, {}ms since last success): {}",
                   containerName, failures, timeSinceLastSuccess, e.getMessage(), e);
-
-      // Increment error metric for monitoring
-      healthCheckErrorsCounter.increment();
 
       // Fail-open only if BOTH conditions are satisfied
       if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
         return true;  // Conservative: prevents restart storms
       } else {
-        // ERROR only once when crossing into persistent failure state
-        if (failures == MAX_CONSECUTIVE_FAILURES + 1 ||
-            (lastSuccess > 0 && timeSinceLastSuccess >= graceWindow && failures == 1)) {
+        // ERROR log only once when crossing failure threshold
+        // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
+        if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
           LOGGER.error("Docker container {} health check failed persistently ({} failures, {}ms without success). " +
                       "Assuming dead to prevent resource leak.",
                       containerName, failures, timeSinceLastSuccess);
@@ -534,18 +537,19 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       // Choose grace window
       long graceWindow = (lastSuccess == 0) ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
 
-      LOGGER.warn("Interrupted while inspecting container {} (failure #{})", containerName, failures, e);
-      Thread.currentThread().interrupt();
-      // Increment error metric for monitoring
+      // Increment error metric first, then restore interrupt flag before logging
       healthCheckErrorsCounter.increment();
+      Thread.currentThread().interrupt();
+
+      LOGGER.warn("Interrupted while inspecting container {} (failure #{})", containerName, failures, e);
 
       // Fail-open only if BOTH conditions are satisfied
       if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
         return true;
       } else {
-        // ERROR only once when crossing threshold
-        if (failures == MAX_CONSECUTIVE_FAILURES + 1 ||
-            (lastSuccess > 0 && timeSinceLastSuccess >= graceWindow && failures == 1)) {
+        // ERROR log only once when crossing failure threshold
+        // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
+        if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
           LOGGER.error("Docker container {} health check failed persistently (interrupted, {} failures, {}ms without success).",
                       containerName, failures, timeSinceLastSuccess);
           // Increment persistent failure metric for alerting
