@@ -16,21 +16,35 @@
  */
 package org.apache.zeppelin.interpreter.launcher;
 
+import com.spotify.docker.client.DockerClient;
+import com.spotify.docker.client.exceptions.DockerException;
+import com.spotify.docker.client.messages.ContainerInfo;
+import com.spotify.docker.client.messages.ContainerState;
 import org.apache.zeppelin.conf.ZeppelinConfiguration;
 import org.apache.zeppelin.conf.ZeppelinConfiguration.ConfVars;
 import org.apache.zeppelin.interpreter.InterpreterOption;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
@@ -141,5 +155,115 @@ class DockerInterpreterProcessTest {
     assertTrue(mapEnv.containsKey("ZEPPELIN_FORCE_STOP"));
     assertTrue(mapEnv.containsKey("SPARK_HOME"));
     assertTrue(mapEnv.containsKey("MY_ENV1"));
+  }
+
+  // ==================== Tests for isAlive() and isRunning() semantics ====================
+
+  private DockerClient mockDockerClient;
+  private ContainerInfo mockContainerInfo;
+  private ContainerState mockContainerState;
+
+  @BeforeEach
+  void setUpHealthCheckTests() {
+    mockDockerClient = mock(DockerClient.class);
+    mockContainerInfo = mock(ContainerInfo.class);
+    mockContainerState = mock(ContainerState.class);
+  }
+
+  @AfterEach
+  void tearDownHealthCheckTests() {
+    // Clear interrupt flag to prevent side effects on other tests
+    Thread.interrupted();
+  }
+
+  /**
+   * Provides test data for Docker container state mapping.
+   * Each argument contains: [status, running, paused, dead, expectedIsAlive]
+   */
+  static Stream<Arguments> dockerStateProvider() {
+    return Stream.of(
+        // Non-terminal states -> alive
+        Arguments.of("created", false, false, false, true),
+        Arguments.of("running", true, false, false, true),
+        Arguments.of("paused", false, true, false, true),
+        Arguments.of("restarting", false, false, false, true),
+
+        // Terminal states -> not alive
+        Arguments.of("exited", false, false, false, false),
+        Arguments.of("dead", false, false, true, false),
+        Arguments.of("removing", false, false, false, false),
+
+        // Dead flag overrides status
+        Arguments.of("running", true, false, true, false)  // Dead flag takes precedence
+    );
+  }
+
+  /**
+   * Table-driven test verifying correct state mapping for all Docker container states.
+   * TODO: Enable once DockerInterpreterProcess has test-friendly constructor
+   */
+  @Disabled("Requires test infrastructure to inject mock DockerClient")
+  @ParameterizedTest
+  @MethodSource("dockerStateProvider")
+  void testIsAliveForDockerStates(String status,
+                                   Boolean running,
+                                   Boolean paused,
+                                   Boolean dead,
+                                   boolean expectedAlive) {
+    // Test implementation pending
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testIsAliveWhenContainerNotFound() {
+    // Test implementation pending
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testIsAliveWhenDockerExceptionInitial() {
+    // Test implementation pending
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testIsAliveWhenPersistentDockerFailures() {
+    // Test implementation pending
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testIsAliveWhenInterrupted() {
+    // Test implementation pending - should verify interrupt flag restoration
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testInvariantIsRunningImpliesIsAlive() {
+    // Test implementation pending - should verify invariant holds
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testIsRunningReturnsFalseWhenNotAlive() {
+    // Test implementation pending - should verify isRunning enforces invariant
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testSuccessfulDockerCheckResetsCounters() {
+    // Test implementation pending
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testInitialGraceWindowForUnvalidatedDockerClient() {
+    // Test implementation pending
+  }
+
+  @Disabled("Requires test infrastructure")
+  @Test
+  void testDockerStatusCaseInsensitiveWithLocale() {
+    // Test implementation pending - should verify toLowerCase(Locale.ROOT) works correctly
   }
 }

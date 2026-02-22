@@ -97,11 +97,29 @@ public class RemoteInterpreterRunningProcess extends RemoteInterpreterProcess {
     }
   }
 
+  /**
+   * For externally managed interpreter processes, we cannot distinguish between
+   * a process that exists but is not ready, and a process that is fully running.
+   *
+   * <p>Since we don't manage the process lifecycle and don't have access to process
+   * status information, we can only check if the remote endpoint is accessible.
+   *
+   * <p>Therefore, for this implementation:
+   * <ul>
+   *   <li>Endpoint accessible => process is both alive AND running</li>
+   *   <li>Endpoint not accessible => process is either dead OR not functional</li>
+   * </ul>
+   *
+   * <p>This makes {@code isAlive()} and {@code isRunning()} semantically equivalent
+   * for this class. The invariant {@code isRunning() => isAlive()} is trivially satisfied.
+   *
+   * @return true if the remote endpoint is accessible
+   */
   @Override
   public boolean isAlive() {
-    //TODO(ZEPPELIN-5876): Implement it more accurately
     return isRunning();
   }
+
   @Override
   public boolean isRunning() {
     return RemoteInterpreterUtils.checkIfRemoteEndpointAccessible(getHost(), getPort());
