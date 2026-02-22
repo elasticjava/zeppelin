@@ -466,13 +466,13 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       if (state == null || state.status() == null) {
         LOGGER.warn("Docker container {} returned null state or status - treating as transient API error", containerName);
         // Don't reset counters - treat as transient error, let failure policy handle it
-        throw new DockerException("Null container state", 500);
+        throw new RuntimeException("Null container state from Docker API");
       }
 
-      // Terminal if: (1) status in terminal set OR (2) dead flag set
+      // Terminal if: (1) status in terminal set OR (2) not running
       String status = state.status();
       boolean isTerminalStatus = TERMINAL_CONTAINER_STATES.contains(status.toLowerCase(Locale.ROOT));
-      boolean isDead = Boolean.TRUE.equals(state.dead());
+      boolean isNotRunning = !Boolean.TRUE.equals(state.running());
 
       // Successful health check: reset counters atomically
       // Set timestamp FIRST to establish "validated" state, then reset failures
@@ -481,11 +481,13 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       lastSuccessfulHealthCheckMs.set(now);
       consecutiveHealthCheckFailures.set(0);
 
-      return !isTerminalStatus && !isDead;
+      return !isTerminalStatus && !isNotRunning;
 
     } catch (DockerException e) {
       // 404 = Container does not exist
-      if (e.status() != null && e.status() == 404) {
+      // Check if exception message indicates container not found
+      String message = e.getMessage();
+      if (message != null && (message.contains("404") || message.contains("No such container"))) {
         LOGGER.debug("Docker container {} not found", containerName);
         // Reset to unvalidated state (definitive answer - container is gone)
         // Set timestamp FIRST for consistency with successful path
