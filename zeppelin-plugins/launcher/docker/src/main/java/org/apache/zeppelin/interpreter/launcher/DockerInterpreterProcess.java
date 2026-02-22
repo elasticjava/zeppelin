@@ -68,6 +68,9 @@ import org.apache.zeppelin.interpreter.remote.RemoteInterpreterUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.zeppelin.conf.ZeppelinConfiguration.ConfVars.ZEPPELIN_SERVER_KERBEROS_KEYTAB;
 
@@ -88,9 +91,18 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
   // Health check state for fail-closed policy (ZEPPELIN-5876)
   private final AtomicLong lastSuccessfulHealthCheckMs = new AtomicLong(0L);
   private final AtomicInteger consecutiveHealthCheckFailures = new AtomicInteger(0);
-  private static final int MAX_CONSECUTIVE_FAILURES = 2;  // TODO: make configurable via zeppelin.conf
-  private static final long HEALTH_CHECK_GRACE_WINDOW_MS = 30_000;  // 30 seconds - TODO: make configurable
+
+  // Configuration constants for fail-closed health check policy
+  // Future enhancement: Make these configurable via ZeppelinConfiguration
+  private static final int MAX_CONSECUTIVE_FAILURES = 2;
+  private static final long HEALTH_CHECK_GRACE_WINDOW_MS = 30_000;  // 30 seconds
   private static final long INITIAL_GRACE_WINDOW_MS = 5_000;  // 5 seconds for unvalidated clients
+
+  // Metrics for monitoring health check behavior
+  private static final Counter healthCheckErrorsCounter =
+      Metrics.counter("zeppelin.launcher.healthcheck.errors", "type", "docker");
+  private static final Counter persistentFailuresCounter =
+      Metrics.counter("zeppelin.launcher.healthcheck.persistent_failures", "type", "docker");
 
   // Terminal container states (based on Docker status strings)
   // Note: "removing" may not be consistently reported across all Docker client versions
@@ -493,7 +505,8 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       LOGGER.warn("Failed to inspect Docker container {} (failure #{}, {}ms since last success): {}",
                   containerName, failures, timeSinceLastSuccess, e.getMessage(), e);
 
-      // TODO: increment metric launcher_healthcheck_errors_total{type="docker"}
+      // Increment error metric for monitoring
+      healthCheckErrorsCounter.increment();
 
       // Fail-open only if BOTH conditions are satisfied
       if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
@@ -505,7 +518,8 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
           LOGGER.error("Docker container {} health check failed persistently ({} failures, {}ms without success). " +
                       "Assuming dead to prevent resource leak.",
                       containerName, failures, timeSinceLastSuccess);
-          // TODO: increment metric launcher_healthcheck_persistent_failures_total{type="docker"}
+          // Increment persistent failure metric for alerting
+          persistentFailuresCounter.increment();
         }
         return false;  // After grace period: fail-closed
       }
@@ -522,7 +536,8 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
       LOGGER.warn("Interrupted while inspecting container {} (failure #{})", containerName, failures, e);
       Thread.currentThread().interrupt();
-      // TODO: increment metric launcher_healthcheck_errors_total{type="docker"}
+      // Increment error metric for monitoring
+      healthCheckErrorsCounter.increment();
 
       // Fail-open only if BOTH conditions are satisfied
       if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
@@ -533,7 +548,8 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
             (lastSuccess > 0 && timeSinceLastSuccess >= graceWindow && failures == 1)) {
           LOGGER.error("Docker container {} health check failed persistently (interrupted, {} failures, {}ms without success).",
                       containerName, failures, timeSinceLastSuccess);
-          // TODO: increment metric launcher_healthcheck_persistent_failures_total{type="docker"}
+          // Increment persistent failure metric for alerting
+          persistentFailuresCounter.increment();
         }
         return false;
       }
