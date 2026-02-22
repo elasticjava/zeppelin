@@ -149,6 +149,28 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       int connectTimeout,
       int connectionPoolSize
   ) {
+    this(zConf, containerImage, interpreterGroupId, interpreterGroupName,
+        interpreterSettingName, properties, envs, intpEventServerHost,
+        intpEventServerPort, connectTimeout, connectionPoolSize, null);
+  }
+
+  /**
+   * Package-private constructor for testing with injected DockerClient.
+   */
+  DockerInterpreterProcess(
+      ZeppelinConfiguration zConf,
+      String containerImage,
+      String interpreterGroupId,
+      String interpreterGroupName,
+      String interpreterSettingName,
+      Properties properties,
+      Map<String, String> envs,
+      String intpEventServerHost,
+      int intpEventServerPort,
+      int connectTimeout,
+      int connectionPoolSize,
+      DockerClient dockerClient
+  ) {
     super(connectTimeout, connectionPoolSize, intpEventServerHost, intpEventServerPort);
 
     this.containerImage = containerImage;
@@ -160,6 +182,7 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
     this.zConf = zConf;
     this.containerName = interpreterGroupId.toLowerCase();
+    this.docker = dockerClient;
 
     containerZeppelinHome = zConf.getString(ConfVars.ZEPPELIN_DOCKER_CONTAINER_HOME);
     containerSparkHome = zConf.getString(ConfVars.ZEPPELIN_DOCKER_CONTAINER_SPARK_HOME);
@@ -172,6 +195,9 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       LOGGER.error(e.getMessage(), e);
     }
     dockerHost = zConf.getString(ConfVars.ZEPPELIN_DOCKER_HOST);
+
+    // Initialize metrics
+    initializeMetrics();
   }
 
   @Override
