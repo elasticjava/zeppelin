@@ -157,23 +157,22 @@ class DockerInterpreterProcessTest {
 
   /**
    * Tests real Docker container states from production.
-   * Container is ALIVE if: status NOT in terminal set AND running==true
-   * Format: status,running,dead,expectedAlive (dead param unused, kept for CSV compatibility)
+   * Container is ALIVE if: status NOT in terminal set AND dead flag NOT set
+   * Format: status,running,dead,expectedAlive
    */
   @ParameterizedTest
   @CsvSource({
-      // Alive: running=true AND status not terminal
+      // Alive: non-terminal states with dead=false
       "running,true,false,true",
-      // Not alive: running=false (even if status is non-terminal)
-      "paused,false,false,false",
-      "created,false,false,false",
-      "restarting,false,false,false",
+      "paused,false,false,true",
+      "created,false,false,true",
+      "restarting,false,false,true",
       // Terminal states (always not alive)
       "exited,false,false,false",
-      "dead,false,false,false",
+      "dead,false,true,false",
       "removing,false,false,false",
-      // Edge case: terminal status overrides running flag
-      "exited,true,false,false"
+      // Edge case: dead flag overrides running and non-terminal status
+      "running,true,true,false"
   })
   void testContainerStates(String status, boolean running, boolean dead, boolean expectedAlive)
       throws Exception {
@@ -181,7 +180,7 @@ class DockerInterpreterProcessTest {
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn(status);
     when(mockContainerState.running()).thenReturn(running);
-    // Note: dead() method not used in production code, only status() and running()
+    when(mockContainerState.dead()).thenReturn(dead);
 
     assertEquals(expectedAlive, process.isAlive(),
         String.format("state=%s running=%s dead=%s", status, running, dead));
@@ -197,6 +196,7 @@ class DockerInterpreterProcessTest {
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn(status);
     when(mockContainerState.running()).thenReturn(false);
+    when(mockContainerState.dead()).thenReturn(false);
 
     assertFalse(process.isAlive(), "Terminal state '" + status + "' should be dead");
   }

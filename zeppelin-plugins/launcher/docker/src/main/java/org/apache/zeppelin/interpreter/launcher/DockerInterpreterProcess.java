@@ -499,11 +499,11 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
         throw new RuntimeException("Null container state from Docker API");
       }
 
-      // Terminal if: (1) status in terminal set OR (2) not running
+      // Terminal if: (1) status in terminal set OR (2) dead flag set
       String status = state.status();
       boolean isTerminalStatus =
           TERMINAL_CONTAINER_STATES.contains(status.toLowerCase(Locale.ROOT));
-      boolean isNotRunning = !Boolean.TRUE.equals(state.running());
+      boolean isDead = Boolean.TRUE.equals(state.dead());
 
       // Successful health check: reset counters atomically
       // Set timestamp FIRST to establish "validated" state, then reset failures
@@ -512,7 +512,7 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       lastSuccessfulHealthCheckMs.set(now);
       consecutiveHealthCheckFailures.set(0);
 
-      return !isTerminalStatus && !isNotRunning;
+      return !isTerminalStatus && !isDead;
 
     } catch (DockerException e) {
       // 404 = Container does not exist
