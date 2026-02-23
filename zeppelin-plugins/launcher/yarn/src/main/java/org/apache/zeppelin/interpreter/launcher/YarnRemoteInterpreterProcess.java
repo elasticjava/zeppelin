@@ -51,6 +51,9 @@ import org.apache.zeppelin.interpreter.remote.RemoteInterpreterProcess;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -65,6 +68,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -84,6 +89,22 @@ public class YarnRemoteInterpreterProcess extends RemoteInterpreterProcess {
   private final Map<String, String> envs;
   private AtomicBoolean isYarnAppRunning = new AtomicBoolean(false);
   private String errorMessage;
+
+  // Health check state for fail-closed policy (ZEPPELIN-5876)
+  private final AtomicLong lastSuccessfulHealthCheckMs = new AtomicLong(0L);
+  private final AtomicInteger consecutiveHealthCheckFailures = new AtomicInteger(0);
+
+  // Configuration constants for fail-closed health check policy
+  // Future enhancement: Make these configurable via ZeppelinConfiguration
+  private static final int MAX_CONSECUTIVE_FAILURES = 2;
+  private static final long HEALTH_CHECK_GRACE_WINDOW_MS = 30_000;  // 30 seconds
+  private static final long INITIAL_GRACE_WINDOW_MS = 5_000;  // 5 seconds for unvalidated clients
+
+  // Metrics for monitoring health check behavior
+  private static final Counter healthCheckErrorsCounter =
+      Metrics.counter("zeppelin.launcher.healthcheck.errors", "type", "yarn");
+  private static final Counter persistentFailuresCounter =
+      Metrics.counter("zeppelin.launcher.healthcheck.persistent_failures", "type", "yarn");
 
   /************** Hadoop related **************************/
   private Configuration hadoopConf;
@@ -636,8 +657,68 @@ public class YarnRemoteInterpreterProcess extends RemoteInterpreterProcess {
 
   @Override
   public boolean isAlive() {
-    //TODO(ZEPPELIN-5876): Implement it more accurately
-    return isRunning();
+    if (appId == null) {
+      return false;
+    }
+
+    try {
+      ApplicationReport report = getApplicationReport(appId);
+      YarnApplicationState state = report.getYarnApplicationState();
+
+      // Successful health check: reset counters atomically
+      // Set timestamp FIRST to establish "validated" state, then reset failures
+      // This prevents race conditions where another thread sees failures=0 but lastSuccess=0
+      long now = System.currentTimeMillis();
+      lastSuccessfulHealthCheckMs.set(now);
+      consecutiveHealthCheckFailures.set(0);
+
+      // Non-terminal states = alive
+      return state != YarnApplicationState.FINISHED &&
+             state != YarnApplicationState.FAILED &&
+             state != YarnApplicationState.KILLED;
+
+    } catch (ApplicationNotFoundException e) {
+      LOGGER.debug("YARN application {} not found", appId);
+      // Reset to unvalidated state (definitive answer - app is gone)
+      // Set timestamp FIRST for consistency with successful path
+      lastSuccessfulHealthCheckMs.set(0L);
+      consecutiveHealthCheckFailures.set(0);
+      return false;
+
+    } catch (YarnException | IOException e) {
+      // Error policy: Fail-closed with grace window to prevent resource leaks
+      int failures = consecutiveHealthCheckFailures.incrementAndGet();
+      long lastSuccess = lastSuccessfulHealthCheckMs.get();
+      long timeSinceLastSuccess = (lastSuccess == 0)
+          ? Long.MAX_VALUE  // Never succeeded
+          : System.currentTimeMillis() - lastSuccess;
+
+      // Choose grace window based on whether we've ever succeeded
+      long graceWindow = (lastSuccess == 0) ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
+
+      // Increment error metric first (before logging, in case logging fails)
+      healthCheckErrorsCounter.increment();
+
+      // WARN for transient errors
+      LOGGER.warn("Failed to get YARN application state for {} (failure #{}, {}ms since last success): {}",
+                  appId, failures, timeSinceLastSuccess, e.getClass().getSimpleName(), e);
+
+      // Fail-open only if BOTH conditions are satisfied
+      if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
+        return true;  // Conservative: assume "alive" within grace window
+      } else {
+        // ERROR log only once when crossing failure threshold
+        // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
+        if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
+          LOGGER.error("YARN application {} health check failed persistently ({} failures, {}ms without success). " +
+                      "Assuming dead to prevent resource leak.",
+                      appId, failures, timeSinceLastSuccess);
+          // Increment persistent failure metric for alerting
+          persistentFailuresCounter.increment();
+        }
+        return false;  // After grace period: fail-closed
+      }
+    }
   }
 
   @Override

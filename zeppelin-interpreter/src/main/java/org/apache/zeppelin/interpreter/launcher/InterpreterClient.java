@@ -69,14 +69,39 @@ public interface InterpreterClient {
   int getPort();
 
   /**
-   * The Interpreter is alive. It's different from `running` as it shows process status only.
-   * @return true if interpreter process is running. Otherwise, false
+   * Checks if the interpreter process is alive.
+   *
+   * <p>An interpreter is considered <b>alive</b> if its execution unit
+   * (container, YARN application, process) exists and is in a non-terminal state.
+   *
+   * <p>Examples of alive states:
+   * <ul>
+   *   <li>YARN: Non-terminal states (e.g., ACCEPTED, SUBMITTED, RUNNING)</li>
+   *   <li>Docker: Non-terminal container states (e.g., created, running, paused, restarting)</li>
+   *   <li>Kubernetes: Pending, Running</li>
+   * </ul>
+   *
+   * <p><b>Invariant:</b> {@code isRunning() => isAlive()} must always hold.
+   * This means: if {@code isRunning()} returns {@code true}, then {@code isAlive()}
+   * must also return {@code true}. The reverse is not required - a process can be
+   * alive without being fully running (e.g., in a starting or restarting state).
+   *
+   * @return true if the process exists and is not in a terminal state
    */
   boolean isAlive();
 
   /**
-   * The interpreter is working as expected. This means the interpreter can communicate with server
-   * @return true if interpreter is working correctly. Otherwise, false
+   * Checks if the interpreter process is running and ready.
+   *
+   * <p>An interpreter is <b>running</b> if it is in an active execution state
+   * (e.g., RUNNING for YARN, running for Docker). Implementations may additionally
+   * check communication readiness (e.g., remote endpoint accessibility), but this
+   * is an implementation detail, not a requirement of the definition.
+   *
+   * <p><b>Invariant:</b> If this returns {@code true}, {@link #isAlive()} must also
+   * return {@code true}.
+   *
+   * @return true if the process is actively running
    */
   boolean isRunning();
 

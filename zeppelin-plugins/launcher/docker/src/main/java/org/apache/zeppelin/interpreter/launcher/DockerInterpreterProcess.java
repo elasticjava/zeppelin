@@ -34,9 +34,13 @@ import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.spotify.docker.client.DefaultDockerClient;
 import com.spotify.docker.client.DockerClient;
@@ -46,6 +50,8 @@ import com.spotify.docker.client.exceptions.DockerException;
 import com.spotify.docker.client.messages.Container;
 import com.spotify.docker.client.messages.ContainerConfig;
 import com.spotify.docker.client.messages.ContainerCreation;
+import com.spotify.docker.client.messages.ContainerInfo;
+import com.spotify.docker.client.messages.ContainerState;
 import com.spotify.docker.client.messages.ExecCreation;
 import com.spotify.docker.client.messages.HostConfig;
 import com.spotify.docker.client.messages.PortBinding;
@@ -62,8 +68,12 @@ import org.apache.zeppelin.interpreter.remote.RemoteInterpreterUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.zeppelin.conf.ZeppelinConfiguration.ConfVars.ZEPPELIN_SERVER_KERBEROS_KEYTAB;
+import static org.apache.zeppelin.conf.ZeppelinConfiguration.ConfVars
+    .ZEPPELIN_SERVER_KERBEROS_KEYTAB;
 
 public class DockerInterpreterProcess extends RemoteInterpreterProcess {
   private static final Logger LOGGER = LoggerFactory.getLogger(DockerInterpreterProcess.class);
@@ -79,8 +89,29 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
   private AtomicBoolean dockerStarted = new AtomicBoolean(false);
 
+  // Health check state for fail-closed policy (ZEPPELIN-5876)
+  private final AtomicLong lastSuccessfulHealthCheckMs = new AtomicLong(0L);
+  private final AtomicInteger consecutiveHealthCheckFailures = new AtomicInteger(0);
+
+  // Configuration constants for fail-closed health check policy
+  // Future enhancement: Make these configurable via ZeppelinConfiguration
+  private static final int MAX_CONSECUTIVE_FAILURES = 2;
+  private static final long HEALTH_CHECK_GRACE_WINDOW_MS = 30_000;  // 30 seconds
+  private static final long INITIAL_GRACE_WINDOW_MS = 5_000;  // 5 seconds for unvalidated clients
+
+  // Metrics for monitoring health check behavior (initialized at class load time)
+  private static final Counter healthCheckErrorsCounter =
+      Metrics.counter("zeppelin.launcher.healthcheck.errors", "type", "docker");
+  private static final Counter persistentFailuresCounter =
+      Metrics.counter("zeppelin.launcher.healthcheck.persistent_failures", "type", "docker");
+
+  // Terminal container states (based on Docker status strings)
+  // Note: "removing" may not be consistently reported across all Docker client versions
+  private static final Set<String> TERMINAL_CONTAINER_STATES =
+      Set.of("exited", "dead", "removing");
+
   private DockerClient docker = null;
-  private final String containerName;
+  final String containerName;  // package-private for test access
   private String containerHost = "";
   private int containerPort = 0;
   private static final String DOCKER_INTP_JINJA = "/jinja_templates/docker-interpreter.jinja";
@@ -119,6 +150,28 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       int connectTimeout,
       int connectionPoolSize
   ) {
+    this(zConf, containerImage, interpreterGroupId, interpreterGroupName,
+        interpreterSettingName, properties, envs, intpEventServerHost,
+        intpEventServerPort, connectTimeout, connectionPoolSize, null);
+  }
+
+  /**
+   * Package-private constructor for testing with injected DockerClient.
+   */
+  DockerInterpreterProcess(
+      ZeppelinConfiguration zConf,
+      String containerImage,
+      String interpreterGroupId,
+      String interpreterGroupName,
+      String interpreterSettingName,
+      Properties properties,
+      Map<String, String> envs,
+      String intpEventServerHost,
+      int intpEventServerPort,
+      int connectTimeout,
+      int connectionPoolSize,
+      DockerClient dockerClient
+  ) {
     super(connectTimeout, connectionPoolSize, intpEventServerHost, intpEventServerPort);
 
     this.containerImage = containerImage;
@@ -130,6 +183,7 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
     this.zConf = zConf;
     this.containerName = interpreterGroupId.toLowerCase();
+    this.docker = dockerClient;
 
     containerZeppelinHome = zConf.getString(ConfVars.ZEPPELIN_DOCKER_CONTAINER_HOME);
     containerSparkHome = zConf.getString(ConfVars.ZEPPELIN_DOCKER_CONTAINER_SPARK_HOME);
@@ -156,7 +210,10 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
   @Override
   public void start(String userName) throws IOException {
-    docker = DefaultDockerClient.builder().uri(URI.create(dockerHost)).build();
+    // Only create DockerClient if not already set (e.g., for testing)
+    if (docker == null) {
+      docker = DefaultDockerClient.builder().uri(URI.create(dockerHost)).build();
+    }
 
     removeExistContainer(containerName);
 
@@ -351,22 +408,24 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
         LOGGER.warn("Ignore the exception when shutting down", e);
       }
     }
-    try {
-      // Kill container
-      docker.killContainer(containerName);
+    if (docker != null) {
+      try {
+        // Kill container
+        docker.killContainer(containerName);
 
-      // Remove container
-      docker.removeContainer(containerName);
-    } catch (InterruptedException e) {
-      LOGGER.error(e.getMessage(), e);
-      // Restore interrupted state...
-      Thread.currentThread().interrupt();
-    } catch (DockerException e) {
-      LOGGER.error(e.getMessage(), e);
+        // Remove container
+        docker.removeContainer(containerName);
+      } catch (InterruptedException e) {
+        LOGGER.error(e.getMessage(), e);
+        // Restore interrupted state...
+        Thread.currentThread().interrupt();
+      } catch (DockerException e) {
+        LOGGER.error(e.getMessage(), e);
+      }
+
+      // Close the docker client
+      docker.close();
     }
-
-    // Close the docker client
-    docker.close();
   }
 
   // Because docker can't create a container with the same name, it will cause the creation to fail.
@@ -424,16 +483,132 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
 
   @Override
   public boolean isAlive() {
-    //TODO(ZEPPELIN-5876): Implement it more accurately
-    return isRunning();
+    if (docker == null || StringUtils.isBlank(containerName)) {
+      return false;
+    }
+
+    try {
+      ContainerInfo info = docker.inspectContainer(containerName);
+      ContainerState state = info.state();
+
+      // Validate state is present
+      if (state == null || state.status() == null) {
+        LOGGER.warn("Docker container {} returned null state or status - "
+            + "treating as transient API error", containerName);
+        // Don't reset counters - treat as transient error, let failure policy handle it
+        throw new RuntimeException("Null container state from Docker API");
+      }
+
+      // Container is alive if status is NOT in terminal set (exited, dead, removing)
+      // Non-terminal states: created, running, paused, restarting
+      // Note: ContainerState API doesn't have dead() method, so we rely on status string
+      String status = state.status();
+      boolean isTerminalStatus =
+          TERMINAL_CONTAINER_STATES.contains(status.toLowerCase(Locale.ROOT));
+
+      // Successful health check: reset counters atomically
+      // Set timestamp FIRST to establish "validated" state, then reset failures
+      // This prevents race conditions where another thread sees failures=0 but lastSuccess=0
+      long now = System.currentTimeMillis();
+      lastSuccessfulHealthCheckMs.set(now);
+      consecutiveHealthCheckFailures.set(0);
+
+      return !isTerminalStatus;
+
+    } catch (DockerException e) {
+      // 404 = Container does not exist
+      // Check if exception message indicates container not found
+      String message = e.getMessage();
+      if (message != null && (message.contains("404") || message.contains("No such container"))) {
+        LOGGER.debug("Docker container {} not found", containerName);
+        // Reset to unvalidated state (definitive answer - container is gone)
+        // Set timestamp FIRST for consistency with successful path
+        lastSuccessfulHealthCheckMs.set(0L);
+        consecutiveHealthCheckFailures.set(0);
+        return false;
+      }
+
+      // Other errors (Timeout, API Error): Fail-closed with grace window
+      int failures = consecutiveHealthCheckFailures.incrementAndGet();
+      long lastSuccess = lastSuccessfulHealthCheckMs.get();
+      long timeSinceLastSuccess = (lastSuccess == 0)
+          ? Long.MAX_VALUE  // Never succeeded
+          : System.currentTimeMillis() - lastSuccess;
+
+      // Choose grace window based on whether we've ever succeeded
+      long graceWindow = (lastSuccess == 0)
+          ? INITIAL_GRACE_WINDOW_MS : HEALTH_CHECK_GRACE_WINDOW_MS;
+
+      // Increment error metric first (before logging, in case logging fails)
+      healthCheckErrorsCounter.increment();
+
+      // WARN for transient errors
+      LOGGER.warn("Failed to inspect Docker container {} "
+          + "(failure #{}, {}ms since last success): {}",
+          containerName, failures, timeSinceLastSuccess, e.getMessage(), e);
+
+      // Fail-open only if BOTH conditions are satisfied
+      if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
+        return true;  // Conservative: prevents restart storms
+      } else {
+        // ERROR log only once when crossing failure threshold
+        // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
+        if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
+          LOGGER.error(
+              "Docker container {} health check failed persistently "
+                  + "({} failures, {}ms without success). Assuming dead to prevent resource leak.",
+              containerName, failures, timeSinceLastSuccess);
+          // Increment persistent failure metric for alerting
+          persistentFailuresCounter.increment();
+        }
+        return false;  // After grace period: fail-closed
+      }
+
+    } catch (InterruptedException e) {
+      int failures = consecutiveHealthCheckFailures.incrementAndGet();
+      long lastSuccess = lastSuccessfulHealthCheckMs.get();
+      long timeSinceLastSuccess = (lastSuccess == 0)
+          ? Long.MAX_VALUE
+          : System.currentTimeMillis() - lastSuccess;
+
+      // Choose grace window
+      long graceWindow = (lastSuccess == 0)
+          ? INITIAL_GRACE_WINDOW_MS
+          : HEALTH_CHECK_GRACE_WINDOW_MS;
+
+      // Increment error metric first, then restore interrupt flag before logging
+      healthCheckErrorsCounter.increment();
+      Thread.currentThread().interrupt();
+
+      LOGGER.warn(
+          "Interrupted while inspecting container {} (failure #{})",
+          containerName, failures, e);
+
+      // Fail-open only if BOTH conditions are satisfied
+      if (timeSinceLastSuccess < graceWindow && failures <= MAX_CONSECUTIVE_FAILURES) {
+        return true;
+      } else {
+        // ERROR log only once when crossing failure threshold
+        // This prevents duplicate ERROR logs when both time and failure thresholds are exceeded
+        if (failures == MAX_CONSECUTIVE_FAILURES + 1) {
+          LOGGER.error(
+              "Docker container {} health check failed persistently "
+                  + "(interrupted, {} failures, {}ms without success).",
+              containerName, failures, timeSinceLastSuccess);
+          // Increment persistent failure metric for alerting
+          persistentFailuresCounter.increment();
+        }
+        return false;
+      }
+    }
   }
 
   @Override
   public boolean isRunning() {
-    if (RemoteInterpreterUtils.checkIfRemoteEndpointAccessible(getHost(), getPort())) {
-      return true;
-    }
-    return false;
+    // Ensure invariant: isRunning() => isAlive()
+    // This prevents violation when endpoint is reachable but inspect is failing
+    return isAlive()
+        && RemoteInterpreterUtils.checkIfRemoteEndpointAccessible(getHost(), getPort());
   }
 
   @Override
