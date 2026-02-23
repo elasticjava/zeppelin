@@ -157,33 +157,30 @@ class DockerInterpreterProcessTest {
 
   /**
    * Tests real Docker container states from production.
-   * Container is ALIVE if: status NOT in terminal set AND dead flag NOT set
-   * Format: status,running,dead,expectedAlive
+   * Container is ALIVE if: status NOT in terminal set {exited, dead, removing}
+   * Non-terminal states: created, running, paused, restarting
+   * Note: ContainerState API doesn't have dead() method - only status string matters
+   * Format: status,expectedAlive
    */
   @ParameterizedTest
   @CsvSource({
-      // Alive: non-terminal states with dead=false
-      "running,true,false,true",
-      "paused,false,false,true",
-      "created,false,false,true",
-      "restarting,false,false,true",
-      // Terminal states (always not alive)
-      "exited,false,false,false",
-      "dead,false,true,false",
-      "removing,false,false,false",
-      // Edge case: dead flag overrides running and non-terminal status
-      "running,true,true,false"
+      // Non-terminal states (alive)
+      "running,true",
+      "paused,true",
+      "created,true",
+      "restarting,true",
+      // Terminal states (not alive)
+      "exited,false",
+      "dead,false",
+      "removing,false"
   })
-  void testContainerStates(String status, boolean running, boolean dead, boolean expectedAlive)
-      throws Exception {
+  void testContainerStates(String status, boolean expectedAlive) throws Exception {
     when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn(status);
-    when(mockContainerState.running()).thenReturn(running);
-    when(mockContainerState.dead()).thenReturn(dead);
 
     assertEquals(expectedAlive, process.isAlive(),
-        String.format("state=%s running=%s dead=%s", status, running, dead));
+        String.format("Container with status=%s should be alive=%s", status, expectedAlive));
   }
 
   /**
@@ -195,10 +192,8 @@ class DockerInterpreterProcessTest {
     when(mockDockerClient.inspectContainer(process.containerName)).thenReturn(mockContainerInfo);
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn(status);
-    when(mockContainerState.running()).thenReturn(false);
-    when(mockContainerState.dead()).thenReturn(false);
 
-    assertFalse(process.isAlive(), "Terminal state '" + status + "' should be dead");
+    assertFalse(process.isAlive(), "Terminal state '" + status + "' should not be alive");
   }
 
   /**
