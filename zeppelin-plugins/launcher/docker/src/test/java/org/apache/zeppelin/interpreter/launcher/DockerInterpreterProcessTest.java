@@ -157,21 +157,23 @@ class DockerInterpreterProcessTest {
 
   /**
    * Tests real Docker container states from production.
-   * Format: status,running,dead,expectedAlive
+   * Container is ALIVE if: status NOT in terminal set AND running==true
+   * Format: status,running,dead,expectedAlive (dead param unused, kept for CSV compatibility)
    */
   @ParameterizedTest
   @CsvSource({
-      // Alive states
+      // Alive: running=true AND status not terminal
       "running,true,false,true",
-      "paused,false,false,true",
-      "created,false,false,true",
-      "restarting,false,false,true",
-      // Terminal states (container is dead)
+      // Not alive: running=false (even if status is non-terminal)
+      "paused,false,false,false",
+      "created,false,false,false",
+      "restarting,false,false,false",
+      // Terminal states (always not alive)
       "exited,false,false,false",
-      "dead,false,true,false",
+      "dead,false,false,false",
       "removing,false,false,false",
-      // Edge case: dead flag overrides running
-      "running,true,true,false"
+      // Edge case: terminal status overrides running flag
+      "exited,true,false,false"
   })
   void testContainerStates(String status, boolean running, boolean dead, boolean expectedAlive)
       throws Exception {
