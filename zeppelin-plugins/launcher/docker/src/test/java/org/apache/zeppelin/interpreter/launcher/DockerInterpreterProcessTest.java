@@ -179,7 +179,7 @@ class DockerInterpreterProcessTest {
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn(status);
     when(mockContainerState.running()).thenReturn(running);
-    when(mockContainerState.dead()).thenReturn(dead);
+    // Note: dead() method not used in production code, only status() and running()
 
     assertEquals(expectedAlive, process.isAlive(),
         String.format("state=%s running=%s dead=%s", status, running, dead));
@@ -195,7 +195,6 @@ class DockerInterpreterProcessTest {
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn(status);
     when(mockContainerState.running()).thenReturn(false);
-    when(mockContainerState.dead()).thenReturn(false);
 
     assertFalse(process.isAlive(), "Terminal state '" + status + "' should be dead");
   }
@@ -213,7 +212,7 @@ class DockerInterpreterProcessTest {
 
     // Verify counters reset: next transient error should fail-open
     when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("Timeout", 500));
+        .thenThrow(new DockerException("Timeout"));
 
     assertTrue(process.isAlive(), "After 404 reset, transient error should fail-open");
   }
@@ -263,7 +262,7 @@ class DockerInterpreterProcessTest {
    */
   @Test
   void testFailureThreshold() throws Exception {
-    DockerException error = new DockerException("Timeout", 500);
+    DockerException error = new DockerException("Timeout");
     when(mockDockerClient.inspectContainer(process.containerName)).thenThrow(error);
 
     // Failures 1 and 2: fail-open
@@ -282,7 +281,7 @@ class DockerInterpreterProcessTest {
   void testRecoveryResetsCounters() throws Exception {
     // Phase 1: Transient error
     when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("Timeout", 500));
+        .thenThrow(new DockerException("Timeout"));
     assertTrue(process.isAlive());
 
     // Phase 2: Recovery
@@ -290,13 +289,12 @@ class DockerInterpreterProcessTest {
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn("running");
     when(mockContainerState.running()).thenReturn(true);
-    when(mockContainerState.dead()).thenReturn(false);
 
     assertTrue(process.isAlive());
 
     // Phase 3: New error - counters were reset, should fail-open
     when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("New timeout", 500));
+        .thenThrow(new DockerException("New timeout"));
     assertTrue(process.isAlive(), "After recovery, new error should fail-open");
   }
 
@@ -311,13 +309,12 @@ class DockerInterpreterProcessTest {
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn("running");
     when(mockContainerState.running()).thenReturn(true);
-    when(mockContainerState.dead()).thenReturn(false);
 
     assertTrue(process.isAlive(), "Container should be alive");
 
     // Phase 2: Crashing (transient errors during crash)
     when(mockDockerClient.inspectContainer(process.containerName))
-        .thenThrow(new DockerException("Timeout", 500));
+        .thenThrow(new DockerException("Timeout"));
     assertTrue(process.isAlive(), "During crash: error #1 fails open");
     assertTrue(process.isAlive(), "During crash: error #2 fails open");
 
@@ -353,7 +350,6 @@ class DockerInterpreterProcessTest {
     when(mockContainerInfo.state()).thenReturn(mockContainerState);
     when(mockContainerState.status()).thenReturn("exited");
     when(mockContainerState.running()).thenReturn(false);
-    when(mockContainerState.dead()).thenReturn(false);
 
     assertFalse(process.isAlive());
     assertFalse(process.isRunning(), "isRunning() must be false when isAlive() is false");

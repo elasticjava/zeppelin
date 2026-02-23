@@ -111,7 +111,7 @@ public class DockerInterpreterProcess extends RemoteInterpreterProcess {
       Set.of("exited", "dead", "removing");
 
   private DockerClient docker = null;
-  private final String containerName;
+  final String containerName;  // package-private for test access
   private String containerHost = "";
   private int containerPort = 0;
   private static final String DOCKER_INTP_JINJA = "/jinja_templates/docker-interpreter.jinja";
